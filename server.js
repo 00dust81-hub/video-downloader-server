@@ -13,8 +13,13 @@
 //   POST /api/download      { url, quality }        -> streams the mp4 back as a download
 //
 // Environment:
-//   PORT        Render sets this automatically (default 3000)
-//   YTDLP_PATH  path to the yt-dlp binary (default: ./yt-dlp next to this file)
+//   PORT            Render sets this automatically (default 3000)
+//   YTDLP_PATH      path to the yt-dlp binary (default: ./yt-dlp next to this file)
+//   YTDLP_COOKIES   optional: paste a Netscape cookies.txt for youtube.com
+//                   (exported from your own logged-in YouTube). With it,
+//                   yt-dlp signs in as you and YouTube's "Sign in to confirm
+//                   you're not a bot" check goes away. The cookies live only
+//                   on this server and are never logged or sent anywhere else.
 // ============================================================================
 
 const express = require('express');
@@ -38,6 +43,19 @@ const DOWNLOAD_TIMEOUT_MS = 20 * 60 * 1000;  // 20 min to finish a download
 const QUALITIES = { '360': 360, '480': 480, '720': 720 };
 
 let activeJobs = 0;
+
+// YouTube cookies (optional, see YTDLP_COOKIES above). Written once at
+// startup to a temp file so yt-dlp can use them; never logged.
+let COOKIES_PATH = null;
+if (process.env.YTDLP_COOKIES && process.env.YTDLP_COOKIES.trim()) {
+  try {
+    COOKIES_PATH = path.join(os.tmpdir(), 'youtube-cookies.txt');
+    fs.writeFileSync(COOKIES_PATH, process.env.YTDLP_COOKIES);
+    log('YouTube cookies loaded from YTDLP_COOKIES');
+  } catch (e) {
+    log('Could not write cookies file:', e.message);
+  }
+}
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -91,8 +109,9 @@ function validateUrl(raw) {
 // yt-dlp helpers
 // ---------------------------------------------------------------------------
 function runYtdlp(args, timeoutMs) {
+  const finalArgs = COOKIES_PATH ? ['--cookies', COOKIES_PATH, ...args] : args;
   return new Promise((resolve, reject) => {
-    execFile(YTDLP, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(YTDLP, finalArgs, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         const msg = (stderr || err.message || '').toString().slice(0, 500);
         return reject(new Error(msg || 'فشل yt-dlp'));
@@ -175,6 +194,7 @@ function downloadVideo(url, quality, tmpDir, playerClient) {
   if (playerClient) {
     args.push('--extractor-args', 'youtube:player_client=' + playerClient);
   }
+  if (COOKIES_PATH) args.unshift('--cookies', COOKIES_PATH);
   args.push(
     '-f', selector,
     '--merge-output-format', 'mp4',
