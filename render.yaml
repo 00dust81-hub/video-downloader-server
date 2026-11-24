@@ -1,0 +1,18 @@
+# Render Blueprint — one-click deploy of the video downloader server
+# In Render: New + -> Blueprint -> connect this repo -> Apply.
+# (Or upload render.yaml with the repo and Render will offer the Blueprint.)
+services:
+  - type: web
+    name: video-downloader-server
+    runtime: node
+    region: frankfurt
+    plan: free
+    buildCommand: >-
+      curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp
+      && chmod +x yt-dlp
+      && npm install
+    startCommand: node server.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
