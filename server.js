@@ -109,17 +109,25 @@ async function fetchInfo(url) {
     return JSON.parse(out);
   } catch (e) {
     // YouTube sometimes answers "Sign in to confirm you're not a bot" from
-    // datacenter IPs. The mobile player clients usually get through, so
-    // retry once with them before giving up.
+    // datacenter IPs. The embedded-TV player client bypasses that check
+    // most often, so retry with it first, then with the mobile clients.
     if (!isBotCheckError(e.message)) throw e;
-    log('INFO bot-check, retrying with mobile clients', url);
-    const out = await runYtdlp(
-      ['--no-playlist', '--no-warnings',
-       '--extractor-args', 'youtube:player_client=android,ios',
-       '--dump-json', url],
-      INFO_TIMEOUT_MS
-    );
-    return JSON.parse(out);
+    for (const client of ['tv_embedded', 'android,ios']) {
+      try {
+        log('INFO bot-check, retrying with player_client=' + client, url);
+        const out = await runYtdlp(
+          ['--no-playlist', '--no-warnings',
+           '--extractor-args', 'youtube:player_client=' + client,
+           '--dump-json', url],
+          INFO_TIMEOUT_MS
+        );
+        return JSON.parse(out);
+      } catch (e2) {
+        if (!isBotCheckError(e2.message)) throw e2;
+        // fall through to the next client
+      }
+    }
+    throw e;
   }
 }
 
@@ -152,7 +160,7 @@ function pickFormats(info) {
     .slice(0, 30);
 }
 
-function downloadVideo(url, quality, tmpDir, retryWithMobileClients) {
+function downloadVideo(url, quality, tmpDir, playerClient) {
   // Best video at or below the requested height + best audio, merged to mp4.
   // Using yt-dlp's own best-match logic (not hardcoded format IDs) because
   // audio track IDs differ per video (e.g. 140 vs 140-1 for Arabic tracks).
@@ -164,8 +172,8 @@ function downloadVideo(url, quality, tmpDir, retryWithMobileClients) {
     '--no-playlist',
     '--no-warnings',
   ];
-  if (retryWithMobileClients) {
-    args.push('--extractor-args', 'youtube:player_client=android,ios');
+  if (playerClient) {
+    args.push('--extractor-args', 'youtube:player_client=' + playerClient);
   }
   args.push(
     '-f', selector,
@@ -266,14 +274,21 @@ async function handleDownload(req, res) {
     }
     const filename = safeFileName(info.title) + '.mp4';
 
-    // 2) Download best video <= requested height + best audio, merged to mp4
-    try {
-      await downloadVideo(url, q, tmpDir, false);
-    } catch (e) {
-      if (!e.botCheck) throw e;
-      log('DOWNLOAD bot-check, retrying with mobile clients', jobId);
-      await downloadVideo(url, q, tmpDir, true);
+    // 2) Download best video <= requested height + best audio, merged to mp4.
+    // Retry chain on bot-check: embedded-TV player first, then mobile clients.
+    let lastErr = null;
+    for (const client of [null, 'tv_embedded', 'android,ios']) {
+      try {
+        await downloadVideo(url, q, tmpDir, client);
+        lastErr = null;
+        break;
+      } catch (e) {
+        if (!e.botCheck) throw e;
+        log('DOWNLOAD bot-check, retrying with player_client=' + (client === null ? 'default->tv_embedded' : client), jobId);
+        lastErr = e;
+      }
     }
+    if (lastErr) throw lastErr;
 
     // 3) Find the finished file, check its size, and stream it to the visitor
     const files = fs.readdirSync(tmpDir).filter((f) => f.startsWith('video.'));
